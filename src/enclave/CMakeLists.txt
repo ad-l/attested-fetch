@@ -21,6 +21,7 @@ set(QCBOR_SRCS
 )
 add_library(qcbor.enclave STATIC ${QCBOR_SRCS})
 target_include_directories(qcbor.enclave PUBLIC "${QCBOR_INC}")
+set_property(TARGET qcbor.enclave PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 set(T_COSE_DIR "${CMAKE_SOURCE_DIR}/../3rdparty/t_cose")
 set(T_COSE_SRC "${T_COSE_DIR}/src")
@@ -37,6 +38,7 @@ target_compile_definitions(t_cose.enclave PRIVATE ${T_COSE_DEFS})
 target_compile_options(t_cose.enclave INTERFACE ${T_COSE_OPTS_INTERFACE})
 target_include_directories(t_cose.enclave PUBLIC "${T_COSE_INC}" PRIVATE "${T_COSE_SRC}")
 target_link_libraries(t_cose.enclave PUBLIC qcbor.enclave)
+set_property(TARGET t_cose.enclave PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 add_custom_command(OUTPUT afetch_t.h afetch_t.c afetch_args.h
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../afetch.edl

@@ -7,9 +7,14 @@ enclave {
 
     trusted {
         public void enclave_main(
+            [string, in] const char* issuer,
+            [string, in] const char* feed,
             [string, in] const char* url,
             [string, in] const char* nonce,
-            [user_check] char** output
+
+            [out, size=total_length] uint8_t *buffer,
+            size_t total_length,
+            [out] size_t* bytes_written,
         );
     };
 

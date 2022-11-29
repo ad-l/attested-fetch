@@ -1,121 +1,191 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#include <iostream>
-#include <string>
-#include <vector>
-#include <map>
+#include "afetch_t.h"
+#include "curl.h"
+#include "t_cose/t_cose_sign1_sign.h"
+#include "util.h"
+
 #include <exception>
-#include <openenclave/enclave.h>
+#include <iostream>
+#include <map>
+#include <nlohmann/json.hpp>
 #include <openenclave/attestation/attester.h>
 #include <openenclave/attestation/custom_claims.h>
 #include <openenclave/attestation/sgx/evidence.h>
-#include <nlohmann/json.hpp>
+#include <openenclave/enclave.h>
+#include <string>
+#include <vector>
 
-#include "curl.h"
-#include "util.h"
-#include "afetch_t.h"
+static constexpr int64_t ATTESTATION_SOURCE_OPENENCLAVE = 1;
 
-extern "C" void enclave_main(const char* url, const char* nonce, char** output) {
-    oe_load_module_host_socket_interface();
-    oe_load_module_host_resolver();
-    afetch::Curl::global_init();
+struct Quote
+{
+  std::vector<uint8_t> evidence;
+  std::vector<uint8_t> endorsements;
+};
 
-    std::string format = "ATTESTED_FETCH_OE_SGX_ECDSA";
-    
-    try {
-        afetch::Curl curl;
+Quote get_quote(std::span<const uint8_t> key)
+{
+  auto sgx_report_data = afetch::sha256(key);
 
-        // Fetch URL
-        auto response = curl.fetch(url);
+  // Create SGX quote with digest of encoded COSE key
+  auto rc = oe_attester_initialize();
+  if (rc != OE_OK)
+  {
+    throw std::logic_error("Failed to initialise evidence attester");
+  }
 
-        // Create output JSON
-        nlohmann::json j;
-        j["url"] = url;
-        j["nonce"] = nonce;
-        j["body"] = afetch::base64(response.body);
-        j["certs"] = response.cert_chain;
+  const size_t custom_claim_length = 1;
+  oe_claim_t custom_claim;
+  custom_claim.name = const_cast<char*>(OE_CLAIM_SGX_REPORT_DATA);
+  custom_claim.value = sgx_report_data.data();
+  custom_claim.value_size = sgx_report_data.size();
 
-        std::string data_json = j.dump(1);
-        std::vector<uint8_t> data_hash = afetch::sha256(data_json);
-        std::string data = afetch::base64(data_json);
+  uint8_t* serialised_custom_claims_buf = nullptr;
+  size_t serialised_custom_claims_size = 0;
 
-        std::vector<uint8_t> format_hash = afetch::sha256(format);
-        std::vector<uint8_t> sgx_report_data = afetch::sha256_two(format_hash, data_hash);
+  rc = oe_serialize_custom_claims(
+    &custom_claim,
+    custom_claim_length,
+    &serialised_custom_claims_buf,
+    &serialised_custom_claims_size);
+  if (rc != OE_OK)
+  {
+    throw std::logic_error("Could not serialise OE custom claim");
+  }
 
-        // Create SGX quote with digest of output JSON as report data
-        auto rc = oe_attester_initialize();
-        if (rc != OE_OK)
-        {
-            throw std::logic_error("Failed to initialise evidence attester");
-        }
+  uint8_t* evidence_buf;
+  size_t evidence_size;
+  uint8_t* endorsements_buf;
+  size_t endorsements_size;
 
-        const size_t custom_claim_length = 1;
-        oe_claim_t custom_claim;
-        custom_claim.name = const_cast<char*>(OE_CLAIM_SGX_REPORT_DATA);
-        custom_claim.value = sgx_report_data.data();
-        custom_claim.value_size = sgx_report_data.size();
+  oe_uuid_t oe_quote_format = {OE_FORMAT_UUID_SGX_ECDSA};
 
-        uint8_t* serialised_custom_claims_buf = nullptr;
-        size_t serialised_custom_claims_size = 0;
+  rc = oe_get_evidence(
+    &oe_quote_format,
+    0,
+    serialised_custom_claims_buf,
+    serialised_custom_claims_size,
+    nullptr,
+    0,
+    &evidence_buf,
+    &evidence_size,
+    &endorsements_buf,
+    &endorsements_size);
+  if (rc != OE_OK)
+  {
+    throw std::logic_error("Failed to get evidence");
+  }
 
-        rc = oe_serialize_custom_claims(
-            &custom_claim,
-            custom_claim_length,
-            &serialised_custom_claims_buf,
-            &serialised_custom_claims_size);
-        if (rc != OE_OK)
-        {
-            throw std::logic_error("Could not serialise OE custom claim");
-        }
+  Quote quote = {
+    std::vector<uint8_t>(evidence_buf, evidence_buf + evidence_size),
+    std::vector<uint8_t>(
+      endorsements_buf, endorsements_buf + endorsements_size),
+  };
 
-        uint8_t* evidence_buf;
-        size_t evidence_size;
-        uint8_t* endorsements_buf;
-        size_t endorsements_size;
+  oe_free_serialized_custom_claims(serialised_custom_claims_buf);
+  oe_free_evidence(evidence_buf);
+  oe_free_endorsements(endorsements_buf);
 
-        oe_uuid_t oe_quote_format = {OE_FORMAT_UUID_SGX_ECDSA};
+  oe_attester_shutdown();
 
-        rc = oe_get_evidence(
-            &oe_quote_format,
-            0,
-            serialised_custom_claims_buf,
-            serialised_custom_claims_size,
-            nullptr,
-            0,
-            &evidence_buf,
-            &evidence_size,
-            &endorsements_buf,
-            &endorsements_size);
-        if (rc != OE_OK)
-        {
-            throw std::logic_error("Failed to get evidence");
-        }
+  return quote;
+}
 
-        std::string evidence = afetch::base64(evidence_buf, evidence_size);
-        std::string endorsements = afetch::base64(endorsements_buf, endorsements_size);
+void encode_attestation_report(
+  QCBOREncodeContext* ctx,
+  const Quote& quote,
+  std::span<const uint8_t> cose_key)
+{
+  QCBOREncode_OpenArray(ctx);
+  QCBOREncode_AddInt64(ctx, ATTESTATION_SOURCE_OPENENCLAVE);
+  QCBOREncode_AddBytes(
+    ctx, UsefulBufC{quote.evidence.data(), quote.evidence.size()});
+  QCBOREncode_AddBytes(
+    ctx, UsefulBufC{quote.endorsements.data(), quote.endorsements.size()});
+  QCBOREncode_AddBytes(ctx, UsefulBufC{cose_key.data(), cose_key.size()});
+  QCBOREncode_CloseArray(ctx);
+}
 
-        oe_free_serialized_custom_claims(serialised_custom_claims_buf);
-        oe_free_evidence(evidence_buf);
-        oe_free_endorsements(endorsements_buf);
+extern "C" void enclave_main(
+        const char* issuer,
+        const char* feed,
+        const char* url,
+        const char* nonce,
+        uint8_t* buffer,
+        size_t total_length,
+        size_t* bytes_written)
+{
+  oe_load_module_host_socket_interface();
+  oe_load_module_host_resolver();
+  afetch::Curl::global_init();
 
-        oe_attester_shutdown();
+  try
+  {
+    afetch::Curl curl;
 
-        // Create attested output
-        nlohmann::json out;
-        out["format"] = format;
-        out["evidence"] = evidence;
-        out["endorsements"] = endorsements;
-        out["data"] = data;
-        std::string out_str = out.dump(1);
+    // Fetch URL
+    auto response = curl.fetch(url);
 
-        // Return to host
-        *output = oe_host_strndup(out_str.data(), out_str.size());
+    // Create output JSON
+    nlohmann::json j;
+    j["url"] = url;
+    j["nonce"] = nonce;
+    j["body"] = afetch::base64(response.body);
+    j["certs"] = response.cert_chain;
 
-    } catch (std::exception& e) {
-        std::cerr << e.what() << std::endl;
-        abort();
+    std::string data_json = j.dump(1);
+
+    int alg = T_COSE_ALGORITHM_ES256;
+    auto key = afetch::create_eckey(alg);
+
+    std::vector<uint8_t> cose_key = afetch::encode_key(alg, key.get());
+    Quote quote = get_quote(cose_key);
+
+    t_cose_key key_pair;
+    key_pair.k.key_ptr = key.get();
+    key_pair.crypto_lib = T_COSE_CRYPTO_LIB_OPENSSL;
+
+    t_cose_sign1_sign_ctx ctx;
+    t_cose_sign1_sign_init(&ctx, 0, alg);
+    t_cose_sign1_set_signing_key(&ctx, key_pair, NULL_Q_USEFUL_BUF_C);
+
+    struct q_useful_buf_c result;
+    auto err = afetch::cose_sign_with_headers(
+      &ctx,
+      UsefulBuf{buffer, total_length},
+      &result,
+      [&](QCBOREncodeContext* cbor_ctx) {
+        QCBOREncode_AddSZStringToMapN(
+          cbor_ctx, COSE_HEADER_PARAM_CONTENT_TYPE, "application/json");
+        QCBOREncode_AddSZStringToMapN(
+          cbor_ctx, COSE_HEADER_PARAM_ISSUER, issuer);
+        QCBOREncode_AddSZStringToMapN(
+          cbor_ctx, COSE_HEADER_PARAM_FEED, feed);
+        QCBOREncode_BstrWrapInMap(
+          cbor_ctx, COSE_HEADER_PARAM_ATTESTATION_REPORT);
+        encode_attestation_report(cbor_ctx, quote, cose_key);
+        QCBOREncode_CloseBstrWrap2(cbor_ctx, false, NULL);
+      },
+      [&](QCBOREncodeContext* cbor_ctx) {},
+      [&](QCBOREncodeContext* cbor_ctx) {
+        QCBOREncode_AddEncoded(
+          cbor_ctx, UsefulBufC{data_json.data(), data_json.size()});
+      });
+
+    if (err != T_COSE_SUCCESS)
+    {
+      throw std::logic_error("Failed to sign message");
     }
 
-    afetch::Curl::global_cleanup();
+    *bytes_written = result.len;
+  }
+  catch (std::exception& e)
+  {
+    std::cerr << e.what() << std::endl;
+    abort();
+  }
+
+  afetch::Curl::global_cleanup();
 }

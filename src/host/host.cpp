@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <vector>
 
 #include <openenclave/host.h>
 
@@ -16,16 +17,18 @@ int main(int argc, const char* argv[])
 
     uint32_t flags = OE_ENCLAVE_FLAG_DEBUG_AUTO;
 
-    if (argc != 5)
+    if (argc != 7)
     {
-        std::cerr << "Usage: " << argv[0] << " enclave_file out_file url nonce" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " enclave_file out_file issuer feed url nonce" << std::endl;
         return 1;
     }
 
     const char* enclave_file = argv[1];
     const char* out_file = argv[2];
-    const char* url = argv[3];
-    const char* nonce = argv[4];
+    const char* issuer = argv[3];
+    const char* feed = argv[4];
+    const char* url = argv[5];
+    const char* nonce = argv[6];
 
     // Create the enclave
     result = oe_create_afetch_enclave(
@@ -38,8 +41,9 @@ int main(int argc, const char* argv[])
     }
 
     // Call into the enclave
-    char* out;
-    result = enclave_main(enclave, url, nonce, &out);
+    std::vector<uint8_t> out(10*1024*1024);
+    size_t n;
+    result = enclave_main(enclave, issuer, feed, url, nonce, out.data(), out.size(), &n);
     if (result != OE_OK)
     {
         std::cerr << "calling into enclave_main failed: result=" << result 
@@ -49,11 +53,8 @@ int main(int argc, const char* argv[])
 
     oe_terminate_enclave(enclave);
 
-    std::ofstream out_stream(out_file);
-    out_stream << out;
-    out_stream.close();
+    std::ofstream out_stream(out_file, std::ios::binary);
+    out_stream.write((const char*)out.data(), n);
 
-    free(out);
-    
     return 0;
 }

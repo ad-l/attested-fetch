@@ -5,16 +5,10 @@
 
 #include <stdexcept>
 #include <iostream>
-#include <sstream>
 #include <string>
-#include <map>
+#include <vector>
 
 #include <curl/curl.h>
-
-#include <mbedtls/pk.h>
-#include <mbedtls/x509_crt.h>
-#include <mbedtls/x509_crl.h>
-#include <mbedtls/ssl.h>
 
 namespace afetch {
 

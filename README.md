@@ -3,6 +3,10 @@
 An experimental tool for fetching content from an HTTPS URL within an SGX enclave.
 The output is a JSON file containing SGX evidence and the HTTPS response.
 
+This is a modified version of the original attested-fetch project. It generates
+a key pair inside the enclave, generates a hardware attestation over the public
+key and signs a COSE Sign1 envelope of the downloaded payload.
+
 ## Getting started
 
 ```sh
@@ -12,7 +16,7 @@ The output is a JSON file containing SGX evidence and the HTTPS response.
 
 Run manually:
 ```sh
-dist/afetch dist/libafetch.enclave.so out.json https://github.com nonce42
+dist/afetch dist/libafetch.enclave.so ISSUER FEED URL NONCE output.cose
 ```
 
 ## Contributing
